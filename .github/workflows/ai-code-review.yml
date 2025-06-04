@@ -3,13 +3,7 @@ name: AI Code Review
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-    paths:
-      - '**.kt'
-      - '**.java'
-      - '**.xml'
-      - '**.gradle'
-      - '**.kts'
-      - '**.pro'
+  workflow_dispatch:
 
 permissions:
   contents: read
