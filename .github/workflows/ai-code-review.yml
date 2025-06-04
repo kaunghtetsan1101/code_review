@@ -4,16 +4,10 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
   workflow_dispatch:
-    inputs:
-      test_mode:
-        description: 'Run in test mode'
-        required: false
-        default: 'true'
 
 permissions:
   contents: read
   pull-requests: write
-  issues: write
 
 jobs:
   code_review:
@@ -25,25 +19,19 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup PR Info
-        id: pr-info
+      - name: Setup Test Mode
+        id: setup
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "pr_title=Manual Test Run" >> $GITHUB_OUTPUT
-            echo "pr_author=manual" >> $GITHUB_OUTPUT
-            echo "pr_url=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> $GITHUB_OUTPUT
-            echo "base_branch=main" >> $GITHUB_OUTPUT
-            echo "head_branch=test" >> $GITHUB_OUTPUT
+            echo "is_test=true" >> $GITHUB_OUTPUT
+            echo "files=MainActivity.kt" >> $GITHUB_OUTPUT
           else
-            echo "pr_title=${{ github.event.pull_request.title }}" >> $GITHUB_OUTPUT
-            echo "pr_author=${{ github.event.pull_request.user.login }}" >> $GITHUB_OUTPUT
-            echo "pr_url=${{ github.event.pull_request.html_url }}" >> $GITHUB_OUTPUT
-            echo "base_branch=${{ github.event.pull_request.base.ref }}" >> $GITHUB_OUTPUT
-            echo "head_branch=${{ github.event.pull_request.head.ref }}" >> $GITHUB_OUTPUT
+            echo "is_test=false" >> $GITHUB_OUTPUT
           fi
 
       - name: Get changed files
         id: changed-files
+        if: steps.setup.outputs.is_test == 'false'
         uses: tj-actions/changed-files@v44
         with:
           separator: ','
@@ -52,372 +40,97 @@ jobs:
             **.java
             **.xml
             **.gradle
-            **.kts
-            **.pro
 
-      - name: Override for test mode
-        id: test-override
-        if: github.event_name == 'workflow_dispatch'
+      - name: Prepare diff content
+        id: diff
         run: |
-          echo "🧪 Test mode: Creating sample files"
-          echo "all_changed_files=MainActivity.kt,activity_main.xml" >> $GITHUB_OUTPUT
-          echo "any_changed=true" >> $GITHUB_OUTPUT
+          if [[ "${{ steps.setup.outputs.is_test }}" == "true" ]]; then
+            echo "Creating test diff..."
+            DIFF_CONTENT="Test diff: Memory leak in MainActivity.kt - static Activity reference"
+          else
+            if [[ "${{ steps.changed-files.outputs.any_changed }}" == "true" ]]; then
+              echo "Getting real diff..."
+              DIFF_CONTENT=$(git diff ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} | head -c 3000)
+            else
+              echo "No files changed"
+              DIFF_CONTENT="No relevant files changed"
+            fi
+          fi
+          echo "diff_content<<ENDOFDIFF" >> $GITHUB_OUTPUT
+          echo "$DIFF_CONTENT" >> $GITHUB_OUTPUT
+          echo "ENDOFDIFF" >> $GITHUB_OUTPUT
 
-      - name: Get PR diff
-        id: pr-diff
-        if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'workflow_dispatch'
+      - name: Call DeepSeek AI
+        id: ai-review
+        if: steps.setup.outputs.is_test == 'true' || steps.changed-files.outputs.any_changed == 'true'
+        env:
+          CODE_REVIEW_API_KEY: ${{ secrets.CODE_REVIEW_API_KEY }}
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            # Create test diff
-            cat > test_diff.txt << 'EOF'
-  diff --git a/app/src/main/java/com/example/MainActivity.kt b/app/src/main/java/com/example/MainActivity.kt
-  index 0000000..1111111 100644
---- a/app/src/main/java/com/example/MainActivity.kt
-  +++ b/app/src/main/java/com/example/MainActivity.kt
-  @@ -10,6 +10,18 @@ class MainActivity : AppCompatActivity() {
-       override fun onCreate(savedInstanceState: Bundle?) {
-         super.onCreate(savedInstanceState)
-         setContentView(R.layout.activity_main)
-  +
-     +        // Potential issues:
-  +        companion object {
-     +            var instance: Activity? = null  // Memory leak!
-  +        }
-  +
-  +        val data = intent.getStringExtra("key")!!  // Force unwrap - crash risk
-  +        textView.text = "Hardcoded string"  // Should use resources
-  +
-  +        Thread.sleep(2000)  // ANR risk - blocking main thread
-  +
-  +        startActivity(Intent(this, NextActivity::class.java))
-  +        finish()  // No transition animation
-  }
-  }
-  EOF
-  DIFF_CONTENT=$(cat test_diff.txt)
-  else
-  # Get actual diff content
-  git diff ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} > pr_diff.txt
-  
-  # Limit diff size
-  if [ $(stat -c%s pr_diff.txt 2>/dev/null || stat -s pr_diff.txt | cut -d' ' -f8) -gt 512000 ]; then
-  echo "Diff too large, truncating..."
-  head -c 512000 pr_diff.txt > pr_diff_truncated.txt
-  mv pr_diff_truncated.txt pr_diff.txt
-  fi
-  
-  DIFF_CONTENT=$(cat pr_diff.txt)
-  fi
-  
-  # Save diff for next step
-  echo "diff_content<<EOF" >> $GITHUB_OUTPUT
-  echo "$DIFF_CONTENT" >> $GITHUB_OUTPUT
-  echo "EOF" >> $GITHUB_OUTPUT
+          echo "🤖 Starting AI Review..."
+          
+          if [ -z "$CODE_REVIEW_API_KEY" ]; then
+            echo "❌ CODE_REVIEW_API_KEY not set"
+            echo "review=ERROR: Please add CODE_REVIEW_API_KEY to repository secrets" >> $GITHUB_OUTPUT
+            echo "status=error" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Prepare simple prompt
+          PROMPT="Review this Android code for issues: ${{ steps.diff.outputs.diff_content }}"
+          
+          # Call DeepSeek API
+          echo "Calling API..."
+          RESPONSE=$(curl -s -X POST https://api.deepseek.com/v1/chat/completions \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $CODE_REVIEW_API_KEY" \
+            -d "{
+              \"model\": \"deepseek-coder\",
+              \"messages\": [
+                {\"role\": \"system\", \"content\": \"You are an Android code reviewer. Be concise.\"},
+                {\"role\": \"user\", \"content\": \"$PROMPT\"}
+              ],
+              \"temperature\": 0.3,
+              \"max_tokens\": 500
+            }")
+          
+          # Extract review
+          if echo "$RESPONSE" | jq -e '.choices[0].message.content' > /dev/null 2>&1; then
+            REVIEW=$(echo "$RESPONSE" | jq -r '.choices[0].message.content')
+            echo "✅ Got AI review"
+            echo "review<<ENDREVIEW" >> $GITHUB_OUTPUT
+            echo "$REVIEW" >> $GITHUB_OUTPUT
+            echo "ENDREVIEW" >> $GITHUB_OUTPUT
+            echo "status=success" >> $GITHUB_OUTPUT
+          else
+            ERROR=$(echo "$RESPONSE" | jq -r '.error.message // "Unknown error"' 2>/dev/null || echo "Failed to parse response")
+            echo "❌ API Error: $ERROR"
+            echo "review=API Error: $ERROR" >> $GITHUB_OUTPUT
+            echo "status=error" >> $GITHUB_OUTPUT
+          fi
 
-     - name: Analyze Android-specific patterns
-       id: android-analysis
-       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'workflow_dispatch'
-       run: |
-         issues=""
-         FILES="${{ steps.test-override.outputs.all_changed_files || steps.changed-files.outputs.all_changed_files }}"
-         
-         # For test mode, simulate some issues
-         if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-           issues="WARNING: Force unwrap (!!) found in: MainActivity.kt\n"
-           issues="${issues}WARNING: Hardcoded strings found in: MainActivity.kt\n"
-         else
-           # Check for real issues in changed files
-           if echo "$FILES" | grep -q "\.xml"; then
-             for file in $(echo "$FILES" | tr ',' ' '); do
-               if [[ -f "$file" ]] && grep -q 'android:text="[^@]' "$file" 2>/dev/null; then
-                 issues="${issues}WARNING: Hardcoded strings found in: $file\n"
-               fi
-             done
-           fi
-         
-           if echo "$FILES" | grep -q "\.kt"; then
-             for file in $(echo "$FILES" | tr ',' ' '); do
-               if [[ -f "$file" ]] && grep -q '!!' "$file" 2>/dev/null; then
-                 issues="${issues}WARNING: Force unwrap (!!) found in: $file\n"
-               fi
-             done
-           fi
-         fi
-         
-         echo "android_issues<<EOF" >> $GITHUB_OUTPUT
-         echo -e "$issues" >> $GITHUB_OUTPUT
-         echo "EOF" >> $GITHUB_OUTPUT
+      - name: Display Results
+        if: always()
+        run: |
+          echo "## 🤖 AI Code Review" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** ${{ steps.ai-review.outputs.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Review:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.ai-review.outputs.review }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
 
-     - name: Call AI Code Review API
-       id: ai-review
-       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'workflow_dispatch'
-       env:
-         CODE_REVIEW_API_KEY: ${{ secrets.CODE_REVIEW_API_KEY }}
-         CODE_REVIEW_WORKER_URL: ${{ secrets.CODE_REVIEW_WORKER_URL }}
-       run: |
-         echo "🤖 Starting AI Code Review..."
-         
-         # Check if API key exists
-         if [ -z "$CODE_REVIEW_API_KEY" ]; then
-           echo "❌ CODE_REVIEW_API_KEY not found in secrets!"
-           echo "Please add it in Settings → Secrets → Actions"
-           echo "response<<EOF" >> $GITHUB_OUTPUT
-           echo '{"status": "error", "message": "CODE_REVIEW_API_KEY not configured"}' >> $GITHUB_OUTPUT
-           echo "EOF" >> $GITHUB_OUTPUT
-           exit 0
-         fi
-         
-         # Use DeepSeek API directly if no worker URL specified
-         if [ -z "$CODE_REVIEW_WORKER_URL" ]; then
-           CODE_REVIEW_WORKER_URL="https://api.deepseek.com/v1/chat/completions"
-           echo "Using default DeepSeek API endpoint"
-         fi
-         
-         echo "✅ API Key found"
-         echo "📍 Worker URL: $CODE_REVIEW_WORKER_URL"
-         
-         # Prepare request based on endpoint type
-         if [[ "$CODE_REVIEW_WORKER_URL" == *"deepseek.com"* ]]; then
-           # DeepSeek API format
-           DIFF_PREVIEW=$(echo "${{ steps.pr-diff.outputs.diff_content }}" | head -c 3000)
-           REQUEST_BODY=$(jq -n \
-             --arg diff "$DIFF_PREVIEW" \
-             --arg files "${{ steps.test-override.outputs.all_changed_files || steps.changed-files.outputs.all_changed_files }}" \
-             --arg issues "${{ steps.android-analysis.outputs.android_issues }}" \
-             '{
-               model: "deepseek-coder",
-               messages: [
-                 {
-                   role: "system",
-                   content: "You are an expert Android code reviewer. Analyze the code and provide specific, actionable feedback."
-                 },
-                 {
-                   role: "user",
-                   content: "Review this Android code:\n\nFiles: \($files)\n\nKnown issues:\n\($issues)\n\nCode diff:\n\($diff)\n\nProvide 3-5 specific points about security, performance, memory leaks, and best practices."
-                 }
-               ],
-               temperature: 0.3,
-               max_tokens: 800
-             }')
-         else
-           # Custom worker format (original)
-           REQUEST_BODY=$(jq -n \
-             --arg repo "${{ github.repository }}" \
-             --arg pr_number "${{ github.event.number || 'TEST' }}" \
-             --arg pr_title "${{ steps.pr-info.outputs.pr_title }}" \
-             --arg pr_author "${{ steps.pr-info.outputs.pr_author }}" \
-             --arg changed_files "${{ steps.test-override.outputs.all_changed_files || steps.changed-files.outputs.all_changed_files }}" \
-             --arg diff_content "${{ steps.pr-diff.outputs.diff_content }}" \
-             --arg android_issues "${{ steps.android-analysis.outputs.android_issues }}" \
-             '{
-               repository: $repo,
-               pr_number: $pr_number,
-               pr_title: $pr_title,
-               pr_author: $pr_author,
-               changed_files: $changed_files,
-               diff_content: $diff_content,
-               android_specific_issues: $android_issues,
-               options: {
-                 focus_areas: ["security", "performance", "best_practices", "android_guidelines"],
-                 severity_threshold: "medium",
-                 max_suggestions: 10
-               }
-             }')
-         fi
-         
-         # Call the API with retry logic - NOTE THE $ SYMBOLS!
-         MAX_RETRIES=3
-         RETRY_COUNT=0
-         
-         while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-           echo "Calling AI review API (attempt $((RETRY_COUNT + 1))/$MAX_RETRIES)..."
-         
-           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
-             -H "Content-Type: application/json" \
-             -H "Authorization: Bearer $CODE_REVIEW_API_KEY" \
-             -d "$REQUEST_BODY" \
-             "$CODE_REVIEW_WORKER_URL" || echo "CURL_ERROR")
-         
-           HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-           RESPONSE_BODY=$(echo "$RESPONSE" | sed '$d')
-         
-           echo "Response code: $HTTP_CODE"
-         
-           if [ "$HTTP_CODE" = "200" ]; then
-             echo "✅ AI review completed successfully"
-         
-             # Handle DeepSeek response format
-             if [[ "$CODE_REVIEW_WORKER_URL" == *"deepseek.com"* ]]; then
-               REVIEW_CONTENT=$(echo "$RESPONSE_BODY" | jq -r '.choices[0].message.content // "No review generated"')
-               # Convert to expected format
-               FORMATTED_RESPONSE=$(jq -n \
-                 --arg content "$REVIEW_CONTENT" \
-                 '{
-                   status: "success",
-                   message: $content,
-                   suggestions: ["See the detailed review above"],
-                   overall_severity: "medium"
-                 }')
-               echo "response<<EOF" >> $GITHUB_OUTPUT
-               echo "$FORMATTED_RESPONSE" >> $GITHUB_OUTPUT
-               echo "EOF" >> $GITHUB_OUTPUT
-             else
-               echo "response<<EOF" >> $GITHUB_OUTPUT
-               echo "$RESPONSE_BODY" >> $GITHUB_OUTPUT
-               echo "EOF" >> $GITHUB_OUTPUT
-             fi
-             break
-           else
-             echo "❌ API call failed with HTTP code: $HTTP_CODE"
-             ERROR_MSG=$(echo "$RESPONSE_BODY" | jq -r '.error.message // empty' 2>/dev/null || echo "$RESPONSE_BODY")
-             echo "Error details: $ERROR_MSG"
-         
-             RETRY_COUNT=$((RETRY_COUNT + 1))
-             if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-               echo "Retrying in 5 seconds..."
-               sleep 5
-             fi
-           fi
-         done
-         
-         if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
-           echo "response<<EOF" >> $GITHUB_OUTPUT
-           echo "{\"status\": \"error\", \"message\": \"Failed after $MAX_RETRIES attempts. Last error: $ERROR_MSG\"}" >> $GITHUB_OUTPUT
-           echo "EOF" >> $GITHUB_OUTPUT
-         fi
-
-     - name: Process AI Response
-       id: process-response
-       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'workflow_dispatch'
-       run: |
-         RESPONSE='${{ steps.ai-review.outputs.response }}'
-         
-         # Parse the response
-         STATUS=$(echo "$RESPONSE" | jq -r '.status // "error"')
-         MESSAGE=$(echo "$RESPONSE" | jq -r '.message // "No message provided"')
-         SUGGESTIONS=$(echo "$RESPONSE" | jq -r '.suggestions // []')
-         SEVERITY=$(echo "$RESPONSE" | jq -r '.overall_severity // "info"')
-         
-         echo "status=$STATUS" >> $GITHUB_OUTPUT
-         echo "message=$MESSAGE" >> $GITHUB_OUTPUT
-         echo "suggestions<<EOF" >> $GITHUB_OUTPUT
-         echo "$SUGGESTIONS" >> $GITHUB_OUTPUT
-         echo "EOF" >> $GITHUB_OUTPUT
-         echo "severity=$SEVERITY" >> $GITHUB_OUTPUT
-         
-         # Add to workflow summary
-         echo "## 🤖 AI Code Review Results" >> $GITHUB_STEP_SUMMARY
-         echo "" >> $GITHUB_STEP_SUMMARY
-         echo "**Status:** $STATUS" >> $GITHUB_STEP_SUMMARY
-         echo "**Severity:** $SEVERITY" >> $GITHUB_STEP_SUMMARY
-         echo "**Files reviewed:** ${{ steps.test-override.outputs.all_changed_files || steps.changed-files.outputs.all_changed_files }}" >> $GITHUB_STEP_SUMMARY
-         echo "" >> $GITHUB_STEP_SUMMARY
-         echo "### Review:" >> $GITHUB_STEP_SUMMARY
-         echo '```' >> $GITHUB_STEP_SUMMARY
-         echo "$MESSAGE" >> $GITHUB_STEP_SUMMARY
-         echo '```' >> $GITHUB_STEP_SUMMARY
-         
-         if [[ "${{ steps.android-analysis.outputs.android_issues }}" != "" ]]; then
-           echo "" >> $GITHUB_STEP_SUMMARY
-           echo "### Android-specific issues found:" >> $GITHUB_STEP_SUMMARY
-           echo '```' >> $GITHUB_STEP_SUMMARY
-           echo "${{ steps.android-analysis.outputs.android_issues }}" >> $GITHUB_STEP_SUMMARY
-           echo '```' >> $GITHUB_STEP_SUMMARY
-         fi
-
-     - name: Comment on PR
-       if: github.event_name == 'pull_request' && (steps.changed-files.outputs.any_changed == 'true' && steps.process-response.outputs.status != 'error')
-       uses: actions/github-script@v7
-       with:
-         github-token: ${{ secrets.GITHUB_TOKEN }}
-         script: |
-           const status = '${{ steps.process-response.outputs.status }}';
-           const message = `${{ steps.process-response.outputs.message }}`;
-           const suggestions = `${{ steps.process-response.outputs.suggestions }}`;
-           const severity = '${{ steps.process-response.outputs.severity }}';
-           const androidIssues = `${{ steps.android-analysis.outputs.android_issues }}`;
-           
-           // Format the comment
-           let comment = `## 🤖 AI Code Review Results\n\n`;
-           
-           // Add status emoji
-           const statusEmoji = {
-             'success': '✅',
-             'warning': '⚠️',
-             'error': '❌',
-             'info': 'ℹ️'
-           };
-           
-           comment += `**Status:** ${statusEmoji[status] || '📋'} ${status.toUpperCase()}\n`;
-           comment += `**Overall Severity:** ${severity}\n\n`;
-           
-           // Add Android-specific issues if any
-           if (androidIssues.trim()) {
-             comment += `### 🤖 Android-Specific Issues\n\`\`\`\n${androidIssues}\`\`\`\n\n`;
-           }
-           
-           // Add main message
-           comment += `### 📝 AI Review\n${message}\n\n`;
-           
-           // Add suggestions if any
-           if (suggestions && suggestions !== '[]') {
-             comment += `### 💡 Suggestions\n`;
-             try {
-               const suggestionList = JSON.parse(suggestions);
-               suggestionList.forEach((suggestion, index) => {
-                 comment += `${index + 1}. ${suggestion}\n`;
-               });
-             } catch (e) {
-               comment += suggestions;
-             }
-           }
-           
-           comment += `\n---\n`;
-           comment += `*This review was generated by AI. Please verify suggestions before implementing.*`;
-           
-           // Post the comment
-           await github.rest.issues.createComment({
-             owner: context.repo.owner,
-             repo: context.repo.repo,
-             issue_number: context.issue.number,
-             body: comment
-           });
-
-     - name: Send Slack Notification
-       if: always() && (steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'workflow_dispatch')
-       continue-on-error: true
-       env:
-         SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
-       run: |
-         if [ -z "$SLACK_WEBHOOK" ]; then
-           echo "Slack webhook not configured, skipping"
-           exit 0
-         fi
-         
-         STATUS="${{ steps.process-response.outputs.status }}"
-         SEVERITY="${{ steps.process-response.outputs.severity }}"
-         PR_TITLE="${{ steps.pr-info.outputs.pr_title }}"
-         PR_URL="${{ steps.pr-info.outputs.pr_url }}"
-         
-         # Set color based on status
-         case "$SEVERITY" in
-           "critical"|"high") COLOR="danger" ;;
-           "medium"|"warning") COLOR="warning" ;;
-           *) COLOR="good" ;;
-         esac
-         
-         # Send notification
-         curl -X POST -H 'Content-type: application/json' \
-           --data "{
-             \"attachments\": [{
-               \"color\": \"$COLOR\",
-               \"title\": \"AI Code Review Complete\",
-               \"title_link\": \"$PR_URL\",
-               \"text\": \"$PR_TITLE\",
-               \"fields\": [
-                 {\"title\": \"Status\", \"value\": \"$STATUS\", \"short\": true},
-                 {\"title\": \"Severity\", \"value\": \"$SEVERITY\", \"short\": true}
-               ]
-             }]
-           }" \
-           "$SLACK_WEBHOOK"
+      - name: Comment on PR
+        if: github.event_name == 'pull_request' && steps.ai-review.outputs.status == 'success'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const review = `${{ steps.ai-review.outputs.review }}`;
+            const comment = `## 🤖 AI Code Review\n\n${review}\n\n---\n*AI-generated review. Please verify before implementing.*`;
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: comment
+            });
