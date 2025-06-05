@@ -6,4 +6,5 @@ data class TestOne(
     var name : String,
     var age : Int,
     var address : Address,
+    val test : String,
 )
