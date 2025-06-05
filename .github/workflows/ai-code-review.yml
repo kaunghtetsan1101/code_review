@@ -64,28 +64,6 @@ jobs:
             "$CODE_REVIEW_WORKER_URL" || echo '{"status":"error","message":"API call failed"}')
           
           echo "response=$response" >> $GITHUB_OUTPUT
-      
-
-      - name: Post PR Comment
-        if: github.event_name == 'pull_request' && steps.call-deepseek.outputs.response
-        uses: actions/github-script@v7
-        continue-on-error: true
-        with:
-          script: |
-            try {
-              const response = JSON.parse(`${{ steps.call-deepseek.outputs.response }}`);
-              const review = response.review || '⚠️ No review content returned.';
-
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body: `## 🤖 AI Code Review ✅\n\n${review}`
-              });
-            } catch (error) {
-              console.error('❌ Failed to parse or post review:', error);
-            }
-      
 
       - name: Send Slack Notification
         if: always()
@@ -111,10 +89,10 @@ jobs:
           curl -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK"
 
       - name: Print AI Review (Debug)
-        if: github.event_name == 'pull_request'
         run: |
-            echo "Review content:"
-            echo '${{ steps.call-deepseek.outputs.response }}' | jq -r '.review'
+          echo 'Raw API Response:'
+          echo '${{ steps.call-deepseek.outputs.response }}'
+      
 
 
 
