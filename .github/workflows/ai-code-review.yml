@@ -82,21 +82,24 @@ jobs:
 
           echo "$RESPONSE_JSON" > /tmp/response.json
 
-          # Extract and check review field
-          if jq -e 'has("review")' /tmp/response.json >/dev/null; then
-            jq -r '.review // ""' /tmp/response.json > /tmp/review.txt
-          else
-            echo "⚠️ No review key found"
-            echo "AI Code Review failed or returned no result." > /tmp/review.txt
-          fi
+          # Extract review or fallback
+          review=$(jq -r '.review // "⚠️ No review returned."' /tmp/response.json)
 
-          head -c 3900 /tmp/review.txt > /tmp/review-short.txt
+          # Truncate for Slack (optional but safe)
+          echo "$review" | head -c 3900 > /tmp/review-short.txt
 
-          jq -Rs --arg prefix "🤖 *AI Code Review Result:*\n```\n" --arg suffix "\n```" \
-            '{ text: ($prefix + . + $suffix) }' < /tmp/review-short.txt > /tmp/payload.json
+          # Wrap in code block formatting and safely encode to JSON using jq
+          printf "🤖 *AI Code Review Result:*\n\`\`\`\n" > /tmp/slack-body.txt
+          cat /tmp/review-short.txt >> /tmp/slack-body.txt
+          printf "\n\`\`\`\n" >> /tmp/slack-body.txt
 
-          echo "🚀 Sending full review to Slack..."
+          jq -Rs '{ text: . }' < /tmp/slack-body.txt > /tmp/payload.json
+
+          echo "✅ Sending payload to Slack..."
+          cat /tmp/payload.json
+
           curl -X POST -H 'Content-type: application/json' --data @/tmp/payload.json "$SLACK_WEBHOOK"
+      
       
       
       
