@@ -4,12 +4,29 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - run: |
-          if [ -z "${{ secrets.SLACK_WEBHOOK }}" ]; then
-            echo "❌ SLACK_WEBHOOK not set! Add it in Settings → Secrets"
+      - name: Test Slack Integration
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+        run: |
+          # Check if environment variable is set
+          if [ -z "$SLACK_WEBHOOK" ]; then
+            echo "❌ SLACK_WEBHOOK not set!"
+            exit 1
           else
             echo "✅ SLACK_WEBHOOK is configured"
-            curl -X POST -H 'Content-type: application/json' \
-              -d '{"text":"✅ Slack is working!"}' \
-              "${{ secrets.SLACK_WEBHOOK }}"
+          
+            # Send test message
+            echo "📤 Sending test message to Slack..."
+          
+            response=$(curl -s -X POST -H 'Content-type: application/json' \
+              --data '{"text":"🎉 Slack integration is working! This is a test from GitHub Actions."}' \
+              "$SLACK_WEBHOOK")
+          
+            echo "Response: $response"
+          
+            if [ "$response" = "ok" ]; then
+              echo "✅ Message sent successfully! Check your Slack channel."
+            else
+              echo "❌ Unexpected response: $response"
+            fi
           fi
