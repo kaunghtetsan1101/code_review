@@ -80,25 +80,30 @@ jobs:
             exit 0
           fi
 
-          echo "📤 Sending full AI review to Slack..."
-
           echo "$RESPONSE_JSON" > /tmp/response.json
 
           if jq -e 'has("review")' /tmp/response.json >/dev/null; then
-            review=$(jq -r '.review' /tmp/response.json)
+            review=$(jq -r '.review // ""' /tmp/response.json)
 
-            # Truncate if review is too long for Slack (limit is ~4000 chars)
+            echo ">>> REVIEW START <<<"
+            echo "$review"
+            echo ">>> REVIEW END <<<"
+
+            if [ -z "$review" ]; then
+              echo "⚠️ 'review' exists but is empty"
+              review="(Empty review content returned by AI)"
+            fi
+
             truncated=$(echo "$review" | head -c 3900)
-
-            # Escape Slack-sensitive characters like &
             escaped=$(printf '%s\n' "$truncated" | sed 's/&/\\&/g')
 
-            payload=$(jq -n --arg text "🤖 *AI Code Review Result*:\n```\n$escaped\n```" '{ text: $text }')
-            curl -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK"
+            payload=$(jq -n --arg text "🤖 *AI Code Review Result:*\n```\n$escaped\n```" '{ text: $text }')
           else
-            payload=$(jq -n --arg text "⚠️ AI Code Review failed or returned no review." '{ text: $text }')
-            curl -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK"
+            payload=$(jq -n --arg text "⚠️ AI Code Review failed or no output." '{ text: $text }')
           fi
+
+          curl -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK"
+      
       
       
       
