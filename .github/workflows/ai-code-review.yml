@@ -26,26 +26,81 @@ jobs:
           CODE_REVIEW_WORKER_URL: ${{ secrets.CODE_REVIEW_WORKER_URL }}
         run: |
           # Call the DeepSeek AI worker with the changed files
-          # and store the response in a variable
           echo "Calling DeepSeek AI worker..."
-          response=$(curl -X POST -H "Content-Type: application/json" -H "Authorization: Bearer $CODE_REVIEW_API_KEY" -d '{"repository": "${{ github.repository }}", "pr_number": "${{ github.event.number }}", "changed_files": "${{ steps.changed-files.outputs.all_changed_files }}", "options": {}}' $CODE_REVIEW_WORKER_URL)
-          echo "::set-output name=response::$response"
+          
+          # Prepare the JSON payload
+          json_payload=$(jq -n \
+            --arg repo "${{ github.repository }}" \
+            --arg pr "${{ github.event.number }}" \
+            --arg files "${{ steps.changed-files.outputs.all_changed_files }}" \
+            '{
+              repository: $repo,
+              pr_number: ($pr | tonumber),
+              changed_files: $files,
+              options: {}
+            }')
+          
+          # Make the API call and capture the response
+          http_response=$(curl -s -w "\n%{http_code}" -X POST \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $CODE_REVIEW_API_KEY" \
+            -d "$json_payload" \
+            "$CODE_REVIEW_WORKER_URL")
+          
+          # Extract response body and status code
+          response_body=$(echo "$http_response" | sed '$d')
+          http_status=$(echo "$http_response" | tail -n1)
+          
+          # Check if the request was successful
+          if [ "$http_status" -ge 200 ] && [ "$http_status" -lt 300 ]; then
+            echo "API call successful (HTTP $http_status)"
+            echo "response=$response_body" >> $GITHUB_OUTPUT
+          else
+            echo "API call failed (HTTP $http_status)"
+            echo "Response: $response_body"
+            echo "response={\"status\":\"error\",\"message\":\"API call failed with HTTP $http_status\"}" >> $GITHUB_OUTPUT
+            exit 1
+          fi
 
       - name: Process DeepSeek AI Response
         id: process-response
         run: |
           # Process the response from the DeepSeek AI worker
-          # and set outputs for the Slack notification
           echo "Processing DeepSeek AI response..."
-          response="${{ steps.call-deepseek.outputs.response }}"
-          status=$(echo $response | jq -r '.status')
+          response='${{ steps.call-deepseek.outputs.response }}'
+          
+          # Parse the response
+          status=$(echo "$response" | jq -r '.status // "unknown"')
+          message=$(echo "$response" | jq -r '.message // "No message provided"')
+          
+          # Validate and set outputs
           if [ "$status" = "success" ]; then
-            echo "::set-output name=status::success"
-            echo "::set-output name=message::$(echo $response | jq -r '.message')"
+            echo "Review completed successfully"
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "message<<EOF" >> $GITHUB_OUTPUT
+            echo "$message" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
           else
-            echo "::set-output name=status::failure"
-            echo "::set-output name=message::$(echo $response | jq -r '.message')"
+            echo "Review failed or returned error"
+            echo "status=failure" >> $GITHUB_OUTPUT
+            echo "message<<EOF" >> $GITHUB_OUTPUT
+            echo "$message" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            # Don't exit with error here, we still want to send Slack notification
           fi
+
+      - name: Post comment on PR
+        if: steps.process-response.outputs.status == 'success'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const message = `${{ steps.process-response.outputs.message }}`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 🤖 AI Code Review\n\n${message}`
+            });
 
       - name: Send Slack Notification
         if: always()
@@ -54,7 +109,55 @@ jobs:
         run: |
           # Send a Slack notification with the review results
           echo "Sending Slack notification..."
+          
+          # Determine status and emoji
           status="${{ steps.process-response.outputs.status }}"
-          message="${{ steps.process-response.outputs.message }}"
-          payload="{\"text\": \"PR #${{ github.event.number }} - ${{ github.event.pull_request.title }} - Status: $status - Message: $message\"}"
-          curl -X POST -H 'Content-type: application/json' --data "$payload" $SLACK_WEBHOOK
+          if [ "$status" = "success" ]; then
+            emoji="✅"
+            color="good"
+          else
+            emoji="❌"
+            color="danger"
+          fi
+          
+          # Prepare Slack payload with proper escaping
+          message=$(echo '${{ steps.process-response.outputs.message }}' | jq -Rs .)
+          pr_title=$(echo '${{ github.event.pull_request.title }}' | jq -Rs .)
+          
+          payload=$(jq -n \
+            --arg text "PR Code Review $emoji" \
+            --arg color "$color" \
+            --arg pr_number "${{ github.event.number }}" \
+            --arg pr_title "${{ github.event.pull_request.title }}" \
+            --arg pr_url "${{ github.event.pull_request.html_url }}" \
+            --arg status "$status" \
+            --argjson message "$message" \
+            '{
+              text: $text,
+              attachments: [{
+                color: $color,
+                title: "PR #\($pr_number): \($pr_title)",
+                title_link: $pr_url,
+                fields: [
+                  {
+                    title: "Status",
+                    value: $status,
+                    short: true
+                  },
+                  {
+                    title: "Repository",
+                    value: "${{ github.repository }}",
+                    short: true
+                  }
+                ],
+                text: $message,
+                footer: "GitHub Actions",
+                footer_icon: "https://github.githubassets.com/favicon.ico",
+                ts: (now | floor)
+              }]
+            }')
+          
+          # Send to Slack
+          curl -X POST -H 'Content-type: application/json' \
+            --data "$payload" \
+            "$SLACK_WEBHOOK" || echo "Failed to send Slack notification"
