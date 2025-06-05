@@ -63,12 +63,16 @@ jobs:
             -d "$json_payload" \
             "$CODE_REVIEW_WORKER_URL" || echo '{"status":"error","message":"API call failed"}')
           
-          echo "response=$response" >> $GITHUB_OUTPUT
+          echo "response<<EOF" >> $GITHUB_OUTPUT
+          echo "$response" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
 
       - name: Send Slack Notification
         if: always()
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+          RESPONSE_JSON: ${{ steps.call-deepseek.outputs.response }}
         continue-on-error: true
         run: |
           if [ -z "$SLACK_WEBHOOK" ]; then
@@ -79,18 +83,20 @@ jobs:
           echo "✅ Slack webhook configured"
           echo "📤 Sending notification..."
 
-          # Safely write the raw response to a file instead of using it inline
-          echo '${{ steps.call-deepseek.outputs.response }}' > /tmp/response.json
+          # Save the JSON to a file safely
+          echo "$RESPONSE_JSON" > /tmp/response.json
 
-          # Use jq to check if "review" exists
+          # Check if "review" field exists
           if jq -e 'has("review")' /tmp/response.json >/dev/null; then
             status="success"
           else
             status="error"
           fi
 
+          # Post simple Slack notification
           payload=$(jq -n --arg text "🤖 AI Code Review Complete - Status: $status" '{ text: $text }')
           curl -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK"
+      
       
       
       
