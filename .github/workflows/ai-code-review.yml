@@ -80,22 +80,26 @@ jobs:
             exit 0
           fi
 
-          echo "✅ Slack webhook configured"
-          echo "📤 Sending notification..."
+          echo "📤 Sending full AI review to Slack..."
 
-          # Save the JSON to a file safely
           echo "$RESPONSE_JSON" > /tmp/response.json
 
-          # Check if "review" field exists
           if jq -e 'has("review")' /tmp/response.json >/dev/null; then
-            status="success"
-          else
-            status="error"
-          fi
+            review=$(jq -r '.review' /tmp/response.json)
 
-          # Post simple Slack notification
-          payload=$(jq -n --arg text "🤖 AI Code Review Complete - Status: $status" '{ text: $text }')
-          curl -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK"
+            # Truncate if review is too long for Slack (limit is ~4000 chars)
+            truncated=$(echo "$review" | head -c 3900)
+
+            # Escape Slack-sensitive characters like &
+            escaped=$(printf '%s\n' "$truncated" | sed 's/&/\\&/g')
+
+            payload=$(jq -n --arg text "🤖 *AI Code Review Result*:\n```\n$escaped\n```" '{ text: $text }')
+            curl -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK"
+          else
+            payload=$(jq -n --arg text "⚠️ AI Code Review failed or returned no review." '{ text: $text }')
+            curl -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK"
+          fi
+      
       
       
       

@@ -5,5 +5,4 @@ import android.location.Address
 data class TestTwo(
     var age : Int,
     var name : String,
-    var address : Address,
     )
