@@ -75,23 +75,29 @@ jobs:
             echo "⚠️ SLACK_WEBHOOK not configured - skipping notification"
             exit 0
           fi
-          
+
           echo "✅ Slack webhook configured"
           echo "📤 Sending notification..."
-                    
-          if jq -e '.review' response.json >/dev/null; then
+
+          echo '${{ steps.call-deepseek.outputs.response }}' > /tmp/review.json
+
+          has_review=$(jq -r 'has("review")' /tmp/review.json)
+
+          if [ "$has_review" = "true" ]; then
             status="success"
           else
             status="error"
           fi
-          
+
           payload=$(jq -n --arg text "🤖 AI Code Review Complete - Status: $status" '{ text: $text }')
           curl -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK"
+      
 
-      - name: Print AI Review (Debug)
+      - name: Print Raw Worker Response
         run: |
-          echo 'Raw API Response:'
+          echo "==== Raw API Output ===="
           echo '${{ steps.call-deepseek.outputs.response }}'
+      
       
 
 
