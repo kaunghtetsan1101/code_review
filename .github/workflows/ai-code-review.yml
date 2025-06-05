@@ -82,27 +82,26 @@ jobs:
 
           echo "$RESPONSE_JSON" > /tmp/response.json
 
+          # Extract and check review field
           if jq -e 'has("review")' /tmp/response.json >/dev/null; then
-            review=$(jq -r '.review // ""' /tmp/response.json)
-
-            echo ">>> REVIEW START <<<"
-            echo "$review"
-            echo ">>> REVIEW END <<<"
-
-            if [ -z "$review" ]; then
-              echo "⚠️ 'review' exists but is empty"
-              review="(Empty review content returned by AI)"
-            fi
-
-            truncated=$(echo "$review" | head -c 3900)
-            escaped=$(printf '%s\n' "$truncated" | sed 's/&/\\&/g')
-
-            payload=$(jq -n --arg text "🤖 *AI Code Review Result:*\n```\n$escaped\n```" '{ text: $text }')
+            jq -r '.review // ""' /tmp/response.json > /tmp/review.txt
           else
-            payload=$(jq -n --arg text "⚠️ AI Code Review failed or no output." '{ text: $text }')
+            echo "⚠️ No review key found"
+            echo "AI Code Review failed or returned no result." > /tmp/review.txt
           fi
 
-          curl -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK"
+          # Truncate to 3900 characters if too long
+          head -c 3900 /tmp/review.txt > /tmp/review-short.txt
+
+          # Build the Slack message as a properly escaped JSON string
+          jq -Rs --arg prefix "🤖 *AI Code Review Result:*\n```" --arg suffix "\n```" \
+            -n '{ text: $prefix + . + $suffix }' < /tmp/review-short.txt > /tmp/payload.json
+
+          echo "Sending to Slack..."
+          cat /tmp/payload.json
+
+          curl -X POST -H 'Content-type: application/json' --data @/tmp/payload.json "$SLACK_WEBHOOK"
+      
       
       
       
