@@ -73,22 +73,19 @@ jobs:
         with:
           script: |
             try {
-              const response = JSON.parse('${{ steps.call-deepseek.outputs.response }}');
-              const status = response.status || 'unknown';
-              const message = response.message || 'No details available';
-            
-              const emoji = status === 'success' ? '✅' : '⚠️';
-              const body = `## 🤖 AI Code Review ${emoji}\n\n${message}`;
-            
+              const response = JSON.parse(`${{ steps.call-deepseek.outputs.response }}`);
+              const review = response.review || '⚠️ No review content returned.';
+
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: context.issue.number,
-                body
+                body: `## 🤖 AI Code Review ✅\n\n${review}`
               });
             } catch (error) {
-              console.error('Error posting comment:', error);
+              console.error('❌ Failed to parse or post review:', error);
             }
+      
 
       - name: Send Slack Notification
         if: always()
@@ -96,17 +93,22 @@ jobs:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
         continue-on-error: true
         run: |
-          # Check if SLACK_WEBHOOK environment variable exists
-          if [ -z "$SLACK_WEBHOOK" ]; then  # Use $SLACK_WEBHOOK, not ${{ secrets.SLACK_WEBHOOK }}
+          if [ -z "$SLACK_WEBHOOK" ]; then
             echo "⚠️ SLACK_WEBHOOK not configured - skipping notification"
             exit 0
           fi
-          
+
           echo "✅ Slack webhook configured"
           echo "📤 Sending notification..."
-          
-          response='${{ steps.call-deepseek.outputs.response || '{"status":"error","message":"No response"}' }}'
-          status=$(echo "$response" | jq -r '.status // "error"')
-          
-          payload="{\"text\": \"Code Review Complete - Status: $status\"}"
+
+          response=${{ steps.call-deepseek.outputs.response || '{"review":"No response"}' }}
+          has_review=$(echo "$response" | jq -r 'has("review")')
+
+          if [ "$has_review" = "true" ]; then
+            status="success"
+          else
+            status="error"
+          fi
+
+          payload="{\"text\": \"AI Code Review Complete - Status: $status\"}"
           curl -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK"
