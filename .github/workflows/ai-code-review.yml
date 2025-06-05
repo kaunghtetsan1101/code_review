@@ -1,18 +1,11 @@
-name: AI Code Review
+name: PR Code Review
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-  workflow_dispatch:
-
-permissions:
-  contents: read
-  pull-requests: write
-  issues: write
 
 jobs:
   code_review:
-    name: AI-Powered Code Review
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -20,366 +13,48 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup PR Info
-        id: pr-info
-        run: |
-          echo "pr_title=${{ github.event.pull_request.title }}" >> $GITHUB_OUTPUT
-          echo "pr_author=${{ github.event.pull_request.user.login }}" >> $GITHUB_OUTPUT
-          echo "pr_url=${{ github.event.pull_request.html_url }}" >> $GITHUB_OUTPUT
-          echo "base_branch=${{ github.event.pull_request.base.ref }}" >> $GITHUB_OUTPUT
-          echo "head_branch=${{ github.event.pull_request.head.ref }}" >> $GITHUB_OUTPUT
-
       - name: Get changed files
         id: changed-files
         uses: tj-actions/changed-files@v44
         with:
           separator: ','
-          files: |
-            **.kt
-            **.java
-            **.xml
-            **.gradle
-            **.kts
-            **.pro
 
-      - name: Get PR diff
-        id: pr-diff
-        if: steps.changed-files.outputs.any_changed == 'true'
-        run: |
-          # Get the actual diff content for better context
-          git diff ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} > pr_diff.txt
-          
-          # Limit diff size to prevent API issues (500KB limit)
-          if [ $(stat -c%s pr_diff.txt) -gt 512000 ]; then
-            echo "Diff too large, truncating..."
-            head -c 512000 pr_diff.txt > pr_diff_truncated.txt
-            mv pr_diff_truncated.txt pr_diff.txt
-          fi
-          
-          # Escape the diff for JSON
-          DIFF_CONTENT=$(cat pr_diff.txt | jq -Rs .)
-          echo "diff_content<<EOF" >> $GITHUB_OUTPUT
-          echo "$DIFF_CONTENT" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Create test diff for manual runs
-        id: test-diff
-        if: github.event_name == 'workflow_dispatch'
-        run: |
-          # Create a sample diff for testing
-          echo "Creating test diff for manual run..."
-          TEST_DIFF="diff --git a/MainActivity.kt b/MainActivity.kt
-          +companion object { var activity: Activity? = null } // Memory leak
-          +val text = data!! // Force unwrap
-          +textView.text = \"Hardcoded string\" // Should use resources"
-          
-          DIFF_CONTENT=$(echo "$TEST_DIFF" | jq -Rs .)
-          echo "diff_content<<EOF" >> $GITHUB_OUTPUT
-          echo "$DIFF_CONTENT" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-          echo "any_changed=true" >> $GITHUB_OUTPUT
-          echo "all_changed_files=MainActivity.kt" >> $GITHUB_OUTPUT
-
-      - name: Analyze Android-specific patterns
-        id: android-analysis
-        if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'workflow_dispatch'
-        run: |
-          # Check for common Android issues
-          issues=""
-          
-          # For manual runs, use test files
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            FILES="${{ steps.test-diff.outputs.all_changed_files }}"
-          else
-            FILES="${{ steps.changed-files.outputs.all_changed_files }}"
-          fi
-          
-          # Check for hardcoded strings in layouts
-          if echo "$FILES" | grep -q "\.xml"; then
-            hardcoded=$(echo "$FILES" | tr ',' '\n' | grep '\.xml' | xargs -I {} grep -l 'android:text="[^@]' {} 2>/dev/null || true)
-            if [ ! -z "$hardcoded" ]; then
-              issues="${issues}WARNING: Hardcoded strings found in: ${hardcoded}\n"
-            fi
-          fi
-          
-          # Check for missing null safety in Kotlin
-          if echo "$FILES" | grep -q "\.kt"; then
-            nullsafety=$(echo "$FILES" | tr ',' '\n' | grep '\.kt' | xargs -I {} grep -l '!!' {} 2>/dev/null || true)
-            if [ ! -z "$nullsafety" ]; then
-              issues="${issues}WARNING: Force unwrap (!!) found in: ${nullsafety}\n"
-            fi
-          fi
-          
-          echo "android_issues<<EOF" >> $GITHUB_OUTPUT
-          echo "$issues" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Call AI Code Review API
-        id: ai-review
-        if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'workflow_dispatch'
+      - name: Call DeepSeek AI Worker
+        id: call-deepseek
         env:
           CODE_REVIEW_API_KEY: ${{ secrets.CODE_REVIEW_API_KEY }}
           CODE_REVIEW_WORKER_URL: ${{ secrets.CODE_REVIEW_WORKER_URL }}
         run: |
-          # Use test diff for manual runs
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            DIFF_CONTENT="${{ steps.test-diff.outputs.diff_content }}"
-            CHANGED_FILES="${{ steps.test-diff.outputs.all_changed_files }}"
-          else
-            DIFF_CONTENT="${{ steps.pr-diff.outputs.diff_content }}"
-            CHANGED_FILES="${{ steps.changed-files.outputs.all_changed_files }}"
-          fi
-          
-          # Prepare the request payload
-          REQUEST_BODY=$(jq -n \
-            --arg repo "${{ github.repository }}" \
-            --arg pr_number "${{ github.event.number }}" \
-            --arg pr_title "${{ steps.pr-info.outputs.pr_title }}" \
-            --arg pr_author "${{ steps.pr-info.outputs.pr_author }}" \
-            --arg changed_files "$CHANGED_FILES" \
-            --arg diff_content "$DIFF_CONTENT" \
-            --arg android_issues "${{ steps.android-analysis.outputs.android_issues }}" \
-            '{
-              repository: $repo,
-              pr_number: $pr_number,
-              pr_title: $pr_title,
-              pr_author: $pr_author,
-              changed_files: $changed_files,
-              diff_content: $diff_content,
-              android_specific_issues: $android_issues,
-              options: {
-                focus_areas: ["security", "performance", "best_practices", "android_guidelines"],
-                severity_threshold: "medium",
-                max_suggestions: 10
-              }
-            }')
-          
-          # Call the AI API with retry logic
-          MAX_RETRIES=3
-          RETRY_COUNT=0
-          
-          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-            echo "Calling AI review API (attempt $((RETRY_COUNT + 1))/$MAX_RETRIES)..."
-          
-            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
-              -H "Content-Type: application/json" \
-              -H "Authorization: Bearer $CODE_REVIEW_API_KEY" \
-              -d "$REQUEST_BODY" \
-              "$CODE_REVIEW_WORKER_URL" || echo "CURL_ERROR")
-          
-            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-            RESPONSE_BODY=$(echo "$RESPONSE" | sed '$d')
-          
-            if [ "$HTTP_CODE" = "200" ]; then
-              echo "AI review completed successfully"
-              echo "response<<EOF" >> $GITHUB_OUTPUT
-              echo "$RESPONSE_BODY" >> $GITHUB_OUTPUT
-              echo "EOF" >> $GITHUB_OUTPUT
-              break
-            else
-              echo "API call failed with HTTP code: $HTTP_CODE"
-              RETRY_COUNT=$((RETRY_COUNT + 1))
-              if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-                echo "Retrying in 5 seconds..."
-                sleep 5
-              fi
-            fi
-          done
-          
-          if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
-            echo "response<<EOF" >> $GITHUB_OUTPUT
-            echo '{"status": "error", "message": "Failed to get AI review after multiple attempts"}' >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
-          fi
+          # Call the DeepSeek AI worker with the changed files
+          # and store the response in a variable
+          echo "Calling DeepSeek AI worker..."
+          response=$(curl -X POST -H "Content-Type: application/json" -H "Authorization: Bearer $CODE_REVIEW_API_KEY" -d '{"repository": "${{ github.repository }}", "pr_number": "${{ github.event.number }}", "changed_files": "${{ steps.changed-files.outputs.all_changed_files }}", "options": {}}' $CODE_REVIEW_WORKER_URL)
+          echo "::set-output name=response::$response"
 
-      - name: Process AI Response
+      - name: Process DeepSeek AI Response
         id: process-response
-        if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'workflow_dispatch'
         run: |
-          RESPONSE='${{ steps.ai-review.outputs.response }}'
-          
-          # Parse the response
-          STATUS=$(echo "$RESPONSE" | jq -r '.status // "error"')
-          MESSAGE=$(echo "$RESPONSE" | jq -r '.message // "No message provided"')
-          SUGGESTIONS=$(echo "$RESPONSE" | jq -r '.suggestions // []')
-          SEVERITY=$(echo "$RESPONSE" | jq -r '.overall_severity // "info"')
-          
-          echo "status=$STATUS" >> $GITHUB_OUTPUT
-          echo "message=$MESSAGE" >> $GITHUB_OUTPUT
-          echo "suggestions<<EOF" >> $GITHUB_OUTPUT
-          echo "$SUGGESTIONS" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-          echo "severity=$SEVERITY" >> $GITHUB_OUTPUT
-
-      - name: Comment on PR
-        if: steps.changed-files.outputs.any_changed == 'true' && steps.process-response.outputs.status != 'error' && github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const status = '${{ steps.process-response.outputs.status }}';
-            const message = `${{ steps.process-response.outputs.message }}`;
-            const suggestions = `${{ steps.process-response.outputs.suggestions }}`;
-            const severity = '${{ steps.process-response.outputs.severity }}';
-            const androidIssues = `${{ steps.android-analysis.outputs.android_issues }}`;
-            
-            // Format the comment
-            let comment = `## 🤖 AI Code Review Results\n\n`;
-            
-            // Add status emoji
-            const statusEmoji = {
-              'success': '✅',
-              'warning': '⚠️',
-              'error': '❌',
-              'info': 'ℹ️'
-            };
-            
-            comment += `**Status:** ${statusEmoji[status] || '📋'} ${status.toUpperCase()}\n`;
-            comment += `**Overall Severity:** ${severity}\n\n`;
-            
-            // Add Android-specific issues if any
-            if (androidIssues.trim()) {
-              comment += `### 🤖 Android-Specific Issues\n\`\`\`\n${androidIssues}\`\`\`\n\n`;
-            }
-            
-            // Add main message
-            comment += `### 📝 Summary\n${message}\n\n`;
-            
-            // Add suggestions if any
-            if (suggestions && suggestions !== '[]') {
-              comment += `### 💡 Suggestions\n`;
-              try {
-                const suggestionList = JSON.parse(suggestions);
-                suggestionList.forEach((suggestion, index) => {
-                  comment += `${index + 1}. ${suggestion}\n`;
-                });
-              } catch (e) {
-                comment += suggestions;
-              }
-            }
-            
-            comment += `\n---\n`;
-            comment += `*This review was generated by AI and should be considered as suggestions. Please use your judgment when applying these recommendations.*`;
-            
-            // Post the comment
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body: comment
-            });
+          # Process the response from the DeepSeek AI worker
+          # and set outputs for the Slack notification
+          echo "Processing DeepSeek AI response..."
+          response="${{ steps.call-deepseek.outputs.response }}"
+          status=$(echo $response | jq -r '.status')
+          if [ "$status" = "success" ]; then
+            echo "::set-output name=status::success"
+            echo "::set-output name=message::$(echo $response | jq -r '.message')"
+          else
+            echo "::set-output name=status::failure"
+            echo "::set-output name=message::$(echo $response | jq -r '.message')"
+          fi
 
       - name: Send Slack Notification
         if: always()
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
         run: |
-          # Prepare Slack message based on results
-          if [ "${{ steps.changed-files.outputs.any_changed }}" != "true" ] && [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
-            echo "No relevant files changed, skipping Slack notification"
-            exit 0
-          fi
-          
-          if [ -z "$SLACK_WEBHOOK" ]; then
-            echo "Slack webhook not configured"
-            exit 0
-          fi
-          
-          STATUS="${{ steps.process-response.outputs.status }}"
-          SEVERITY="${{ steps.process-response.outputs.severity }}"
-          PR_TITLE="${{ steps.pr-info.outputs.pr_title }}"
-          PR_URL="${{ steps.pr-info.outputs.pr_url }}"
-          PR_AUTHOR="${{ steps.pr-info.outputs.pr_author }}"
-          
-          # Set color based on status/severity
-          case "$SEVERITY" in
-            "critical"|"high")
-              COLOR="danger"
-              ;;
-            "medium"|"warning")
-              COLOR="warning"
-              ;;
-            "low"|"info")
-              COLOR="good"
-              ;;
-            *)
-              COLOR="#808080"
-              ;;
-          esac
-          
-          # Create Slack payload
-          PAYLOAD=$(jq -n \
-            --arg pr_title "$PR_TITLE" \
-            --arg pr_url "$PR_URL" \
-            --arg pr_author "$PR_AUTHOR" \
-            --arg pr_number "${{ github.event.number }}" \
-            --arg status "$STATUS" \
-            --arg severity "$SEVERITY" \
-            --arg color "$COLOR" \
-            --arg message "${{ steps.process-response.outputs.message }}" \
-            '{
-              attachments: [{
-                color: $color,
-                title: "AI Code Review: PR #\($pr_number)",
-                title_link: $pr_url,
-                text: $pr_title,
-                fields: [
-                  {
-                    title: "Author",
-                    value: $pr_author,
-                    short: true
-                  },
-                  {
-                    title: "Status",
-                    value: $status,
-                    short: true
-                  },
-                  {
-                    title: "Severity",
-                    value: $severity,
-                    short: true
-                  },
-                  {
-                    title: "Summary",
-                    value: $message,
-                    short: false
-                  }
-                ],
-                footer: "GitHub Actions AI Review",
-                footer_icon: "https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png",
-                ts: (now | floor)
-              }]
-            }')
-          
-          # Send to Slack
-          curl -X POST -H 'Content-type: application/json' \
-            --data "$PAYLOAD" \
-            "$SLACK_WEBHOOK"
-
-      - name: Set PR Status Check
-        if: steps.changed-files.outputs.any_changed == 'true' && github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const severity = '${{ steps.process-response.outputs.severity }}';
-            const status = '${{ steps.process-response.outputs.status }}';
-            
-            // Determine check status based on severity
-            let checkStatus = 'success';
-            if (severity === 'critical' || status === 'error') {
-              checkStatus = 'failure';
-            } else if (severity === 'high' || severity === 'medium') {
-              checkStatus = 'neutral';
-            }
-            
-            // Create status check
-            await github.rest.repos.createCommitStatus({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              sha: context.sha,
-              state: checkStatus,
-              target_url: '${{ steps.pr-info.outputs.pr_url }}',
-              description: `AI Review: ${severity} severity`,
-              context: 'ai-code-review'
-            });
+          # Send a Slack notification with the review results
+          echo "Sending Slack notification..."
+          status="${{ steps.process-response.outputs.status }}"
+          message="${{ steps.process-response.outputs.message }}"
+          payload="{\"text\": \"PR #${{ github.event.number }} - ${{ github.event.pull_request.title }} - Status: $status - Message: $message\"}"
+          curl -X POST -H 'Content-type: application/json' --data "$payload" $SLACK_WEBHOOK
