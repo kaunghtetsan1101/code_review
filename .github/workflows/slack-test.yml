@@ -1,0 +1,15 @@
+name: Test Slack
+on: workflow_dispatch
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          if [ -z "${{ secrets.SLACK_WEBHOOK }}" ]; then
+            echo "❌ SLACK_WEBHOOK not set! Add it in Settings → Secrets"
+          else
+            echo "✅ SLACK_WEBHOOK is configured"
+            curl -X POST -H 'Content-type: application/json' \
+              -d '{"text":"✅ Slack is working!"}' \
+              "${{ secrets.SLACK_WEBHOOK }}"
+          fi
