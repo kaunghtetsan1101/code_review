@@ -34,27 +34,29 @@ jobs:
         run: |
           echo "🤖 Requesting code review..."
           
-          # Check if secrets exist
           if [ -z "$CODE_REVIEW_API_KEY" ] || [ -z "$CODE_REVIEW_WORKER_URL" ]; then
             echo "::warning::API credentials not configured"
             exit 0
           fi
           
-          # Prepare payload
-          json_payload=$(jq -n \
-            --arg repo "${{ github.repository }}" \
-            --arg pr "${{ github.event.pull_request.number || 0 }}" \
-            --arg files "${{ steps.changed-files.outputs.all_changed_files }}" \
-            '{
-              repository: $repo,
-              pr_number: ($pr | tonumber),
-              changed_files: $files,
-              options: {}
-            }')
+          files_json="[]"
+          IFS=',' read -ra changed <<< "${{ steps.changed-files.outputs.all_changed_files }}"
+          for file in "${changed[@]}"; do
+            # Skip deleted or binary files
+            if [ ! -f "$file" ]; then
+              echo "⚠️ Skipping missing file: $file"
+              continue
+            fi
           
-           echo "payload= $json_payload"
+            code=$(jq -Rs . < "$file")
+            file_json="{\"filename\":\"$file\",\"code\":$code}"
+            files_json=$(echo "$files_json" | jq ". + [$file_json]")
+          done
           
-          # Call API
+          json_payload=$(jq -n --argjson files "$files_json" '{ files: $files }')
+          
+          echo "payload=$json_payload"
+          
           response=$(curl -s -X POST \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $CODE_REVIEW_API_KEY" \
@@ -62,6 +64,7 @@ jobs:
             "$CODE_REVIEW_WORKER_URL" || echo '{"status":"error","message":"API call failed"}')
           
           echo "response=$response" >> $GITHUB_OUTPUT
+      
 
       - name: Post PR Comment
         if: github.event_name == 'pull_request' && steps.call-deepseek.outputs.response
