@@ -79,11 +79,11 @@ jobs:
           echo "✅ Slack webhook configured"
           echo "📤 Sending notification..."
 
-          echo '${{ steps.call-deepseek.outputs.response }}' > /tmp/review.json
+          # Safely write the raw response to a file instead of using it inline
+          echo '${{ steps.call-deepseek.outputs.response }}' > /tmp/response.json
 
-          has_review=$(jq -r 'has("review")' /tmp/review.json)
-
-          if [ "$has_review" = "true" ]; then
+          # Use jq to check if "review" exists
+          if jq -e 'has("review")' /tmp/response.json >/dev/null; then
             status="success"
           else
             status="error"
@@ -92,11 +92,6 @@ jobs:
           payload=$(jq -n --arg text "🤖 AI Code Review Complete - Status: $status" '{ text: $text }')
           curl -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK"
       
-
-      - name: Print Raw Worker Response
-        run: |
-          echo "==== Raw API Output ===="
-          echo '${{ steps.call-deepseek.outputs.response }}'
       
       
 
