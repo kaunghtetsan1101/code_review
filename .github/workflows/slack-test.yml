@@ -10,6 +10,6 @@ jobs:
           else
             echo "✅ SLACK_WEBHOOK is configured"
             curl -X POST -H 'Content-type: application/json' \
-              -d '{"text":"✅ Slack is working!"}' \
-              "${{ secrets.SLACK_WEBHOOK }}"
+              --data '{"text":"✅ Slack is working!"}' \
+              "https://hooks.slack.com/services/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"
           fi
