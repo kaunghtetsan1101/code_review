@@ -100,10 +100,7 @@ jobs:
           
           echo "✅ Slack webhook configured"
           echo "📤 Sending notification..."
-          
-#          # Capture response safely from step output (use file instead of variable execution)
-#          echo '${{ steps.call-deepseek.outputs.response }}' > response.json
-          
+                    
           if jq -e '.review' response.json >/dev/null; then
             status="success"
           else
