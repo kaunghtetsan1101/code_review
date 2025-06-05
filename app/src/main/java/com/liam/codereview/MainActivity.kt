@@ -4,10 +4,8 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -25,8 +23,10 @@ class MainActivity : ComponentActivity() {
             CodeReviewTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     Greeting(
-                        name = "Kaung Htet San",
-                        modifier = Modifier.fillMaxSize().padding(innerPadding)
+                        name = "Thailand...",
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(innerPadding)
                     )
                 }
             }
@@ -39,15 +39,12 @@ fun Greeting(name: String, modifier: Modifier = Modifier) {
     Column(
         modifier = modifier,
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
     ) {
         Text(
             text = "Hello $name!",
-            modifier = modifier
         )
         Text(
-            text = "Welcome to Code Review!",
-            modifier = modifier
+            text = "Welcome Code Review",
         )
     }
 }
