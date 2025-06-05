@@ -124,7 +124,7 @@ jobs:
               ;;
             "full_repository")
               # Get all code files in repository
-              files=$(find . -type f \( -name "*.js" -o -name "*.py" -o -name "*.java" -o -name "*.go" -o -name "*.ts" -o -name "*.jsx" -o -name "*.tsx" \) | sed 's|^\./||' | tr '\n' ',')
+              files=$(find . -type f \(-name "*.kt" -name "*.js" -o -name "*.py" -o -name "*.java" -o -name "*.go" -o -name "*.ts" -o -name "*.jsx" -o -name "*.tsx" \) | sed 's|^\./||' | tr '\n' ',')
               ;;
             *)
               files=""
