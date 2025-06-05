@@ -1,179 +1,59 @@
-name: Automated Code Review
+name: Simple Code Review
 
-# This workflow triggers automatically on multiple events
 on:
-  # Trigger on every push to any branch
   push:
-    branches:
-      - '**'
-
-  # Trigger on pull requests
+    branches: ['**']
   pull_request:
     types: [opened, synchronize, reopened]
 
-  # Trigger on a schedule (e.g., daily code review of main branch)
-  schedule:
-    # Runs at 9 AM UTC every day
-    - cron: '0 9 * * *'
-
-  # Trigger when issues are opened with specific labels
-  issues:
-    types: [labeled]
-
-  # Trigger on new releases
-  release:
-    types: [published]
-
-  # Manual trigger (for testing or on-demand reviews)
-  workflow_dispatch:
-    inputs:
-      branch:
-        description: 'Branch to review'
-        required: false
-        default: 'main'
-      full_review:
-        description: 'Perform full repository review'
-        type: boolean
-        default: false
-
-# Ensures only one review runs at a time per branch
-concurrency:
-  group: code-review-${{ github.ref }}
-  cancel-in-progress: true
+permissions:
+  contents: read
+  pull-requests: write
 
 jobs:
   code_review:
     runs-on: ubuntu-latest
-    # Skip duplicate runs and certain commit messages
-    if: |
-      !contains(github.event.head_commit.message, '[skip ci]') &&
-      !contains(github.event.head_commit.message, '[no review]') &&
-      (github.event_name != 'push' || github.event.head_commit.author.name != 'github-actions[bot]')
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Determine Review Scope
-        id: review-scope
-        run: |
-          echo "🔍 Determining what to review..."
-          
-          case "${{ github.event_name }}" in
-            "push")
-              echo "Event: Push to ${{ github.ref_name }}"
-              echo "scope=changed_files" >> $GITHUB_OUTPUT
-              echo "description=Push to ${{ github.ref_name }}: ${{ github.event.head_commit.message }}" >> $GITHUB_OUTPUT
-              ;;
-            "pull_request")
-              echo "Event: Pull Request #${{ github.event.number }}"
-              echo "scope=changed_files" >> $GITHUB_OUTPUT
-              echo "description=PR #${{ github.event.number }}: ${{ github.event.pull_request.title }}" >> $GITHUB_OUTPUT
-              ;;
-            "schedule")
-              echo "Event: Scheduled review"
-              echo "scope=recent_changes" >> $GITHUB_OUTPUT
-              echo "description=Scheduled daily review of ${{ github.ref_name }}" >> $GITHUB_OUTPUT
-              ;;
-            "workflow_dispatch")
-              if [[ "${{ inputs.full_review }}" == "true" ]]; then
-                echo "Event: Manual full review"
-                echo "scope=full_repository" >> $GITHUB_OUTPUT
-                echo "description=Manual full repository review" >> $GITHUB_OUTPUT
-              else
-                echo "Event: Manual review"
-                echo "scope=branch" >> $GITHUB_OUTPUT
-                echo "description=Manual review of ${{ inputs.branch || github.ref_name }}" >> $GITHUB_OUTPUT
-              fi
-              ;;
-            "issues")
-              echo "Event: Issue labeled for review"
-              echo "scope=issue" >> $GITHUB_OUTPUT
-              echo "description=Review requested via issue #${{ github.event.issue.number }}" >> $GITHUB_OUTPUT
-              ;;
-            *)
-              echo "Event: ${{ github.event_name }}"
-              echo "scope=changed_files" >> $GITHUB_OUTPUT
-              echo "description=${{ github.event_name }} event" >> $GITHUB_OUTPUT
-              ;;
-          esac
-
-      - name: Get files to review
-        id: get-files
-        run: |
-          scope="${{ steps.review-scope.outputs.scope }}"
-          
-          case "$scope" in
-            "changed_files")
-              # Get changed files in the commit/PR
-              if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-                files=$(git diff --name-only ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} | tr '\n' ',')
-              else
-                files=$(git diff --name-only HEAD^ HEAD 2>/dev/null || git ls-tree -r --name-only HEAD | tr '\n' ',')
-              fi
-              ;;
-            "recent_changes")
-              # Get files changed in last 24 hours
-              files=$(git log --since="24 hours ago" --name-only --pretty=format: | sort -u | tr '\n' ',')
-              ;;
-            "branch")
-              # Get all files different from main branch
-              files=$(git diff --name-only origin/main..HEAD | tr '\n' ',')
-              ;;
-            "full_repository")
-              # Get all code files in repository
-              files=$(find . -type f \(-name "*.kt" -name "*.js" -o -name "*.py" -o -name "*.java" -o -name "*.go" -o -name "*.ts" -o -name "*.jsx" -o -name "*.tsx" \) | sed 's|^\./||' | tr '\n' ',')
-              ;;
-            *)
-              files=""
-              ;;
-          esac
-          
-          echo "Files to review: ${files:0:200}..."
-          echo "files=$files" >> $GITHUB_OUTPUT
-          echo "file_count=$(echo $files | tr ',' '\n' | grep -v '^$' | wc -l)" >> $GITHUB_OUTPUT
+      - name: Get changed files
+        id: changed-files
+        uses: tj-actions/changed-files@v44
+        with:
+          separator: ','
 
       - name: Call DeepSeek AI Worker
         id: call-deepseek
-        if: steps.get-files.outputs.file_count != '0'
+        if: steps.changed-files.outputs.any_changed == 'true'
         env:
           CODE_REVIEW_API_KEY: ${{ secrets.CODE_REVIEW_API_KEY }}
           CODE_REVIEW_WORKER_URL: ${{ secrets.CODE_REVIEW_WORKER_URL }}
         run: |
-          echo "🤖 Requesting AI code review for ${{ steps.get-files.outputs.file_count }} files..."
+          echo "🤖 Requesting code review..."
           
-          # Prepare the JSON payload
+          # Check if secrets exist
+          if [ -z "$CODE_REVIEW_API_KEY" ] || [ -z "$CODE_REVIEW_WORKER_URL" ]; then
+            echo "::warning::API credentials not configured"
+            exit 0
+          fi
+          
+          # Prepare payload
           json_payload=$(jq -n \
             --arg repo "${{ github.repository }}" \
-            --arg branch "${{ github.ref_name }}" \
-            --arg files "${{ steps.get-files.outputs.files }}" \
-            --arg event "${{ github.event_name }}" \
-            --arg scope "${{ steps.review-scope.outputs.scope }}" \
-            --arg description "${{ steps.review-scope.outputs.description }}" \
-            --arg pr_number "${{ github.event.pull_request.number || 0 }}" \
-            --arg commit "${{ github.sha }}" \
-            --arg author "${{ github.actor }}" \
+            --arg pr "${{ github.event.pull_request.number || 0 }}" \
+            --arg files "${{ steps.changed-files.outputs.all_changed_files }}" \
             '{
               repository: $repo,
-              branch: $branch,
+              pr_number: ($pr | tonumber),
               changed_files: $files,
-              event_type: $event,
-              review_scope: $scope,
-              description: $description,
-              pr_number: ($pr_number | tonumber),
-              commit_sha: $commit,
-              author: $author,
-              options: {
-                max_files: 100,
-                include_suggestions: true,
-                severity_threshold: "info"
-              }
+              options: {}
             }')
           
-          # Make the API call
-          response=$(curl -s -f -X POST \
+          # Call API
+          response=$(curl -s -X POST \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $CODE_REVIEW_API_KEY" \
             -d "$json_payload" \
@@ -181,148 +61,43 @@ jobs:
           
           echo "response=$response" >> $GITHUB_OUTPUT
 
-      - name: Process Review Results
-        id: process-results
-        if: steps.get-files.outputs.file_count != '0'
-        run: |
-          response='${{ steps.call-deepseek.outputs.response }}'
-          status=$(echo "$response" | jq -r '.status // "error"')
-          message=$(echo "$response" | jq -r '.message // "No response"')
-          
-          echo "status=$status" >> $GITHUB_OUTPUT
-          echo "message<<EOF" >> $GITHUB_OUTPUT
-          echo "$message" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-          
-          # Create summary
-          echo "## 🤖 Code Review Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Event:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Scope:** ${{ steps.review-scope.outputs.description }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Files Reviewed:** ${{ steps.get-files.outputs.file_count }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Status:** $status" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Review Details" >> $GITHUB_STEP_SUMMARY
-          echo "$message" >> $GITHUB_STEP_SUMMARY
-
       - name: Post PR Comment
-        if: github.event_name == 'pull_request' && steps.process-results.outputs.status == 'success'
+        if: github.event_name == 'pull_request' && steps.call-deepseek.outputs.response
         uses: actions/github-script@v7
+        continue-on-error: true
         with:
           script: |
-            const message = `${{ steps.process-results.outputs.message }}`;
+            try {
+              const response = JSON.parse('${{ steps.call-deepseek.outputs.response }}');
+              const status = response.status || 'unknown';
+              const message = response.message || 'No details available';
             
-            // Find and update existing comment or create new one
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number
-            });
+              const emoji = status === 'success' ? '✅' : '⚠️';
+              const body = `## 🤖 AI Code Review ${emoji}\n\n${message}`;
             
-            const botComment = comments.find(comment => 
-              comment.user.type === 'Bot' && 
-              comment.body.includes('🤖 AI Code Review')
-            );
-            
-            const body = `## 🤖 AI Code Review\n\n${message}\n\n---\n*Generated at: ${new Date().toISOString()}*`;
-            
-            if (botComment) {
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: botComment.id,
-                body
-              });
-            } else {
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: context.issue.number,
                 body
               });
+            } catch (error) {
+              console.error('Error posting comment:', error);
             }
 
-      - name: Create Check Run
-        if: github.event_name == 'pull_request' || github.event_name == 'push'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const status = '${{ steps.process-results.outputs.status }}';
-            const message = `${{ steps.process-results.outputs.message }}`;
-            
-            const conclusion = status === 'success' ? 'success' : 'failure';
-            
-            await github.rest.checks.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              name: 'AI Code Review',
-              head_sha: '${{ github.sha }}',
-              status: 'completed',
-              conclusion: conclusion,
-              output: {
-                title: `Code Review ${conclusion === 'success' ? 'Passed' : 'Failed'}`,
-                summary: `Reviewed ${{ steps.get-files.outputs.file_count }} files`,
-                text: message
-              }
-            });
-
       - name: Send Slack Notification
-        if: always() && steps.get-files.outputs.file_count != '0'
+        if: always()
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+        continue-on-error: true
         run: |
-          status="${{ steps.process-results.outputs.status }}"
-          emoji=$([ "$status" = "success" ] && echo "✅" || echo "❌")
-          color=$([ "$status" = "success" ] && echo "good" || echo "danger")
+          if [ -z "$SLACK_WEBHOOK" ]; then
+            echo "Slack webhook not configured"
+            exit 0
+          fi
           
-          # Create rich Slack message
-          slack_payload=$(jq -n \
-            --arg emoji "$emoji" \
-            --arg color "$color" \
-            --arg event "${{ github.event_name }}" \
-            --arg description "${{ steps.review-scope.outputs.description }}" \
-            --arg files "${{ steps.get-files.outputs.file_count }}" \
-            --arg status "$status" \
-            --arg repo "${{ github.repository }}" \
-            --arg url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            --arg message "${{ steps.process-results.outputs.message }}" \
-            '{
-              text: "\($emoji) Code Review Complete",
-              attachments: [{
-                color: $color,
-                title: $description,
-                title_link: $url,
-                fields: [
-                  { title: "Repository", value: $repo, short: true },
-                  { title: "Files Reviewed", value: $files, short: true },
-                  { title: "Event", value: $event, short: true },
-                  { title: "Status", value: $status, short: true }
-                ],
-                text: ($message | .[0:500]),
-                footer: "DeepSeek AI Review",
-                ts: now | floor
-              }]
-            }')
+          response='${{ steps.call-deepseek.outputs.response || '{"status":"error","message":"No response"}' }}'
+          status=$(echo "$response" | jq -r '.status // "error"')
           
-          curl -X POST -H 'Content-type: application/json' \
-            --data "$slack_payload" "$SLACK_WEBHOOK"
-
-      - name: Update Issue
-        if: github.event_name == 'issues' && contains(github.event.label.name, 'review')
-        uses: actions/github-script@v7
-        with:
-          script: |
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body: '✅ Code review has been triggered. Check the Actions tab for results.'
-            });
-            
-            // Remove the review label
-            await github.rest.issues.removeLabel({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              name: context.payload.label.name
-            });
+          payload="{\"text\": \"Code Review Complete - Status: $status\"}"
+          curl -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK"
