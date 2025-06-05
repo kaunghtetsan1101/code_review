@@ -101,14 +101,24 @@ jobs:
           echo "✅ Slack webhook configured"
           echo "📤 Sending notification..."
 
-          # Use jq safely to extract just the status
-          response='${{ steps.call-deepseek.outputs.response || "{\"review\":\"No response\"}" }}'
-          status=$(echo "$response" | jq -r 'if has("review") then "success" else "error" end')
+          # Use fallback if response is empty or undefined
+          response="${{ steps.call-deepseek.outputs.response }}"
+          if [ -z "$response" ]; then
+            response='{"review":"No response"}'
+          fi
+
+          has_review=$(echo "$response" | jq -r 'has("review")')
+
+          if [ "$has_review" = "true" ]; then
+            status="success"
+          else
+            status="error"
+          fi
 
           payload=$(jq -n --arg text "AI Code Review Complete - Status: $status" '{ text: $text }')
-
           curl -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK"
-
+      
+      
 
       - name: Print AI Review (Debug)
         if: github.event_name == 'pull_request'
