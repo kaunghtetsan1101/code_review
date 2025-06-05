@@ -91,10 +91,14 @@ jobs:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
         continue-on-error: true
         run: |
-          if [ -z "$SLACK_WEBHOOK" ]; then
-            echo "Slack webhook not configured"
+          # Check if SLACK_WEBHOOK environment variable exists
+          if [ -z "$SLACK_WEBHOOK" ]; then  # Use $SLACK_WEBHOOK, not ${{ secrets.SLACK_WEBHOOK }}
+            echo "⚠️ SLACK_WEBHOOK not configured - skipping notification"
             exit 0
           fi
+          
+          echo "✅ Slack webhook configured"
+          echo "📤 Sending notification..."
           
           response='${{ steps.call-deepseek.outputs.response || '{"status":"error","message":"No response"}' }}'
           status=$(echo "$response" | jq -r '.status // "error"')
