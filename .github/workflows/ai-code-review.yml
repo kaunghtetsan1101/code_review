@@ -52,6 +52,8 @@ jobs:
               options: {}
             }')
           
+           echo "payload= $json_payload"
+          
           # Call API
           response=$(curl -s -X POST \
             -H "Content-Type: application/json" \
